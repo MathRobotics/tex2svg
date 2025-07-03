@@ -1,0 +1,143 @@
+<!-- index.html : Generate SVG vector images from LaTeX equations
+     - Pure static SPA (no build step)
+     - MathJax v3 (tex-svg.js) for LaTeX → SVG
+     - TailwindCSS (CDN) for minimal styling
+     - Supports \bm via MathJax "bm" package
+     - Includes small security/perf hardening (revoking Blob URLs, input length guard, aria‑labels)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Math → SVG Generator</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- MathJax configuration: enable \bm -->
+  <script>
+    window.MathJax = {
+      tex: {
+        packages: { '[+]': ['bm'] },
+        macros: { bm: ["\\boldsymbol{#1}", 1] }
+      }
+    };
+  </script>
+  <!-- MathJax (SVG output) -->
+  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+<body class="min-h-screen bg-gray-50 flex flex-col items-center py-8 px-4">
+  <header class="mb-6 text-center">
+    <h1 class="text-3xl font-semibold">Math → SVG Generator</h1>
+    <p class="text-gray-600 mt-2">Enter a LaTeX equation, generate an SVG, then download it or copy it to your clipboard.</p>
+  </header>
+
+  <main class="w-full max-w-3xl flex flex-col gap-6">
+    <!-- Input area -->
+    <label class="block">
+      <span class="text-lg font-medium">LaTeX Equation</span>
+      <textarea id="latex-input" rows="4" placeholder="\\bm{F}=m\\bm{a}"
+        class="mt-2 w-full rounded-lg border border-gray-300 p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        aria-label="LaTeX equation input"></textarea>
+    </label>
+
+    <!-- Button group -->
+    <div class="flex flex-wrap items-center gap-4">
+      <button id="generate-btn" aria-label="Generate SVG" class="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg shadow">
+        Generate / Update
+      </button>
+      <button id="copy-btn" aria-label="Copy SVG to clipboard" class="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40" disabled>
+        Copy to Clipboard
+      </button>
+      <!-- Download link: visible but disabled until first generation -->
+      <a id="download-link" aria-label="Download SVG" href="#" download="formula.svg"
+         class="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg shadow opacity-40 pointer-events-none hover:bg-indigo-700">
+        Download SVG
+      </a>
+    </div>
+
+    <!-- Preview -->
+    <section>
+      <h2 class="text-lg font-medium mb-2">Preview</h2>
+      <div id="preview" class="min-h-[4rem] p-4 bg-white border rounded-lg overflow-auto"></div>
+    </section>
+  </main>
+
+  <!-- Script -->
+  <script>
+    // Wait for MathJax to finish loading
+    function ready(cb) {
+      if (window.MathJax?.startup?.promise) { MathJax.startup.promise.then(cb); }
+      else { setTimeout(() => ready(cb), 50); }
+    }
+
+    ready(() => {
+      const input   = document.getElementById('latex-input');
+      const preview = document.getElementById('preview');
+      const link    = document.getElementById('download-link');
+      const genBtn  = document.getElementById('generate-btn');
+      const copyBtn = document.getElementById('copy-btn');
+
+      const MAX_LENGTH = 20000; // 20 kB guard
+      let currentSvgString = '';
+      let currentBlobUrl   = null;
+
+      // Convert LaTeX to SVGElement
+      const texToSvg = (tex) => {
+        const wrapper = MathJax.tex2svg(tex, { display: true });
+        const svg = wrapper.querySelector('svg');
+        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        return svg;
+      };
+
+      // Generate & update UI
+      const generate = () => {
+        let tex = input.value.trim();
+        if (!tex) return;
+        if (tex.length > MAX_LENGTH) {
+          alert('Input is too long (> 20 kB). Please shorten it.');
+          return;
+        }
+
+        const svgEl = texToSvg(tex);
+        preview.innerHTML = '';
+        preview.appendChild(svgEl.cloneNode(true));
+
+        const svgString = new XMLSerializer().serializeToString(svgEl);
+        currentSvgString = svgString;
+
+        // Revoke old Blob URL if any
+        if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+
+        const blob = new Blob([svgString], { type: 'image/svg+xml' });
+        currentBlobUrl  = URL.createObjectURL(blob);
+        link.href = currentBlobUrl;
+
+        // Enable download link
+        link.classList.remove('opacity-40', 'pointer-events-none');
+        copyBtn.disabled = false;
+      };
+
+      // Copy SVG to clipboard (Illustrator‑friendly)
+      const copyToClipboard = async () => {
+        if (!currentSvgString) return;
+        try {
+          if (navigator.clipboard?.write) {
+            const blob = new Blob([currentSvgString], { type: 'image/svg+xml' });
+            await navigator.clipboard.write([new ClipboardItem({ 'image/svg+xml': blob })]);
+          } else {
+            await navigator.clipboard.writeText(currentSvgString);
+          }
+          copyBtn.classList.add('bg-green-600');
+          setTimeout(() => copyBtn.classList.remove('bg-green-600'), 800);
+        } catch (err) {
+          alert('Failed to copy: ' + err);
+        }
+      };
+
+      genBtn.addEventListener('click', generate);
+      copyBtn.addEventListener('click', copyToClipboard);
+    });
+  </script>
+</body>
+</html>
