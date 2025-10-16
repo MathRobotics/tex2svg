@@ -1,16 +1,11 @@
-<!-- index.html : Generate SVG vector images from LaTeX equations
-     - Pure static SPA (no build step)
-     - MathJax v3 (tex-svg.js) for LaTeX → SVG
-     - TailwindCSS (CDN) for minimal styling
-     - Supports \bm via MathJax "bm" package
-     - Includes small security/perf hardening (revoking Blob URLs, input length guard, aria‑labels)
--->
+<!-- index.html : Math → SVG Generator with localStorage history & autosave draft -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Math → SVG Generator</title>
+
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
 
@@ -29,27 +24,29 @@
 <body class="min-h-screen bg-gray-50 flex flex-col items-center py-8 px-4">
   <header class="mb-6 text-center">
     <h1 class="text-3xl font-semibold">Math → SVG Generator</h1>
-    <p class="text-gray-600 mt-2">Enter a LaTeX equation, generate an SVG, then download it or copy it to your clipboard.</p>
+    <p class="text-gray-600 mt-2">Enter a LaTeX equation, generate an SVG, then download it or copy it.</p>
   </header>
 
-  <main class="w-full max-w-3xl flex flex-col gap-6">
-    <!-- Input area -->
+  <main class="w-full max-w-4xl flex flex-col gap-6">
+    <!-- Input -->
     <label class="block">
       <span class="text-lg font-medium">LaTeX Equation</span>
       <textarea id="latex-input" rows="4" placeholder="\\bm{F}=m\\bm{a}"
         class="mt-2 w-full rounded-lg border border-gray-300 p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
         aria-label="LaTeX equation input"></textarea>
+      <div id="draftStatus" class="text-sm text-gray-500 mt-1">Autosaving draft to browser…</div>
     </label>
 
-    <!-- Button group -->
-    <div class="flex flex-wrap items-center gap-4">
-      <button id="generate-btn" aria-label="Generate SVG" class="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg shadow">
+    <!-- Buttons -->
+    <div class="flex flex-wrap items-center gap-3">
+      <button id="generate-btn" aria-label="Generate SVG"
+        class="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg shadow">
         Generate / Update
       </button>
-      <button id="copy-btn" aria-label="Copy SVG to clipboard" class="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40" disabled>
+      <button id="copy-btn" aria-label="Copy SVG to clipboard"
+        class="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40" disabled>
         Copy to Clipboard
       </button>
-      <!-- Download link: visible but disabled until first generation -->
       <a id="download-link" aria-label="Download SVG" href="#" download="formula.svg"
          class="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg shadow opacity-40 pointer-events-none hover:bg-indigo-700">
         Download SVG
@@ -61,27 +58,128 @@
       <h2 class="text-lg font-medium mb-2">Preview</h2>
       <div id="preview" class="min-h-[4rem] p-4 bg-white border rounded-lg overflow-auto"></div>
     </section>
+
+    <!-- History panel -->
+    <section class="bg-white border rounded-lg p-4">
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-baseline gap-2">
+          <h2 class="text-lg font-medium">History</h2>
+          <span id="histCount" class="text-sm text-gray-500"></span>
+        </div>
+        <div class="flex gap-2">
+          <button id="exportBtn" class="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 border">Export JSON</button>
+          <button id="clearBtn" class="px-3 py-1.5 rounded-md bg-rose-600 text-white hover:bg-rose-700">Clear All</button>
+        </div>
+      </div>
+      <ul id="historyList" class="space-y-2"></ul>
+      <p class="text-xs text-gray-500 mt-2">History and drafts are stored only in this browser (localStorage).</p>
+    </section>
   </main>
 
-  <!-- Script -->
   <script>
-    // Wait for MathJax to finish loading
+    // ----- Constants -----
+    const KEY_HISTORY = 'mathsvg.history.v1';
+    const KEY_DRAFT   = 'mathsvg.draft.v1';
+    const MAX_ITEMS   = 200;
+    const MAX_LENGTH  = 20000; // 20 kB input guard
+
+    // ----- Helpers -----
+    const $ = sel => document.querySelector(sel);
+    const $list = $('#historyList');
+    const $count = $('#histCount');
+    const $input = $('#latex-input');
+    const $draftStatus = $('#draftStatus');
+    const $preview = $('#preview');
+    const $link = $('#download-link');
+    const $genBtn = $('#generate-btn');
+    const $copyBtn = $('#copy-btn');
+    const $exportBtn = $('#exportBtn');
+    const $clearBtn = $('#clearBtn');
+
+    let currentSvgString = '';
+    let currentBlobUrl = null;
+    let draftTimer = null;
+
+    function nowISO(){ return new Date().toISOString(); }
+    function fmt(ts){ try { return new Date(ts).toLocaleString(); } catch { return ts; } }
+    function escapeHtml(s){ return (s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    function loadHistory(){
+      try { return JSON.parse(localStorage.getItem(KEY_HISTORY) || '[]'); }
+      catch { return []; }
+    }
+    function saveHistory(arr){
+      localStorage.setItem(KEY_HISTORY, JSON.stringify(arr.slice(0, MAX_ITEMS)));
+      renderHistory();
+    }
+    function addSnapshot(tex){
+      if (!tex) return;
+      const arr = loadHistory();
+      arr.unshift({ id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()), ts: nowISO(), tex });
+      saveHistory(arr);
+    }
+    function addSnapshotIfChanged(tex){
+      const t = (tex || '').trim();
+      if (!t) return;
+      const arr = loadHistory();
+      const last = arr[0];
+      if (!last || (last.tex ?? '') !== t) {
+        addSnapshot(t);
+      }
+    }
+    function removeSnapshot(id){
+      saveHistory(loadHistory().filter(x => x.id !== id));
+    }
+    function clearAllHistory(){
+      if (confirm('Delete all history in this browser?')) {
+        localStorage.removeItem(KEY_HISTORY);
+        renderHistory();
+      }
+    }
+
+    function renderHistory(){
+      const arr = loadHistory();
+      $list.innerHTML = '';
+      $count.textContent = `(${arr.length} / ${MAX_ITEMS})`;
+      for (const item of arr){
+        const li = document.createElement('li');
+        li.className = 'border rounded-lg p-3';
+        li.innerHTML = `
+          <div class="flex items-start justify-between gap-3">
+            <div class="grow">
+              <div class="text-xs text-gray-500 mb-1">${escapeHtml(fmt(item.ts))}</div>
+              <pre class="text-sm overflow-x-auto whitespace-pre-wrap">${escapeHtml(item.tex)}</pre>
+            </div>
+            <div class="shrink-0 flex flex-col gap-2">
+              <button data-act="restore" data-id="${item.id}" class="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 border">Restore</button>
+              <button data-act="delete"  data-id="${item.id}" class="px-3 py-1.5 rounded-md bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700">Delete</button>
+            </div>
+          </div>
+        `;
+        $list.append(li);
+      }
+    }
+
+    function setBlobForDownload(svgString){
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+      const blob = new Blob([svgString], { type: 'image/svg+xml' });
+      currentBlobUrl = URL.createObjectURL(blob);
+      $link.href = currentBlobUrl;
+      $link.classList.remove('opacity-40', 'pointer-events-none');
+      $copyBtn.disabled = false;
+    }
+
+    function setDraftStatus(text){
+      $draftStatus.textContent = text;
+    }
+
+    // ----- MathJax Ready -----
     function ready(cb) {
       if (window.MathJax?.startup?.promise) { MathJax.startup.promise.then(cb); }
       else { setTimeout(() => ready(cb), 50); }
     }
 
     ready(() => {
-      const input   = document.getElementById('latex-input');
-      const preview = document.getElementById('preview');
-      const link    = document.getElementById('download-link');
-      const genBtn  = document.getElementById('generate-btn');
-      const copyBtn = document.getElementById('copy-btn');
-
-      const MAX_LENGTH = 20000; // 20 kB guard
-      let currentSvgString = '';
-      let currentBlobUrl   = null;
-
       // Convert LaTeX to SVGElement
       const texToSvg = (tex) => {
         const wrapper = MathJax.tex2svg(tex, { display: true });
@@ -90,35 +188,25 @@
         return svg;
       };
 
-      // Generate & update UI
+      // Generate preview and prepare download/copy
       const generate = () => {
-        let tex = input.value.trim();
+        const tex = $input.value.trim();
         if (!tex) return;
         if (tex.length > MAX_LENGTH) {
           alert('Input is too long (> 20 kB). Please shorten it.');
           return;
         }
-
         const svgEl = texToSvg(tex);
-        preview.innerHTML = '';
-        preview.appendChild(svgEl.cloneNode(true));
+        $preview.innerHTML = '';
+        $preview.appendChild(svgEl.cloneNode(true));
 
         const svgString = new XMLSerializer().serializeToString(svgEl);
         currentSvgString = svgString;
-
-        // Revoke old Blob URL if any
-        if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
-
-        const blob = new Blob([svgString], { type: 'image/svg+xml' });
-        currentBlobUrl  = URL.createObjectURL(blob);
-        link.href = currentBlobUrl;
-
-        // Enable download link
-        link.classList.remove('opacity-40', 'pointer-events-none');
-        copyBtn.disabled = false;
+        setBlobForDownload(svgString);
+        addSnapshotIfChanged(tex);
       };
 
-      // Copy SVG to clipboard (Illustrator‑friendly)
+      // Clipboard copy
       const copyToClipboard = async () => {
         if (!currentSvgString) return;
         try {
@@ -128,15 +216,73 @@
           } else {
             await navigator.clipboard.writeText(currentSvgString);
           }
-          copyBtn.classList.add('bg-green-600');
-          setTimeout(() => copyBtn.classList.remove('bg-green-600'), 800);
+          $copyBtn.classList.add('bg-green-600');
+          setTimeout(() => $copyBtn.classList.remove('bg-green-600'), 800);
         } catch (err) {
           alert('Failed to copy: ' + err);
         }
       };
 
-      genBtn.addEventListener('click', generate);
-      copyBtn.addEventListener('click', copyToClipboard);
+      // Draft autosave
+      function saveDraft(){
+        const draft = { tex: $input.value };
+        try { localStorage.setItem(KEY_DRAFT, JSON.stringify(draft)); } catch {}
+        setDraftStatus('Draft saved locally');
+      }
+      function restoreDraft(){
+        try {
+          const d = JSON.parse(localStorage.getItem(KEY_DRAFT) || 'null');
+          if (d && typeof d.tex === 'string') {
+            $input.value = d.tex;
+            setDraftStatus('Draft restored from localStorage');
+          } else {
+            setDraftStatus('Autosaving draft to browser…');
+          }
+        } catch {
+          setDraftStatus('Autosaving draft to browser…');
+        }
+      }
+
+      // Wire events
+      $genBtn.addEventListener('click', generate);
+      $copyBtn.addEventListener('click', copyToClipboard);
+      $exportBtn.addEventListener('click', () => {
+        const blob = new Blob([localStorage.getItem(KEY_HISTORY) || '[]'], { type:'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.download = 'mathsvg_history.json';
+        a.href = url;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+      $clearBtn.addEventListener('click', clearAllHistory);
+      $list.addEventListener('click', (e)=>{
+        const btn = e.target.closest('button'); if (!btn) return;
+        const id = btn.dataset.id; const act = btn.dataset.act;
+        if (act === 'delete') removeSnapshot(id);
+        if (act === 'restore') {
+          const item = loadHistory().find(x=>x.id===id);
+          if (item){ $input.value = item.tex; saveDraft(); $input.focus(); }
+        }
+      });
+
+      // Input debounced autosave
+      for (const ev of ['input','change']) {
+        $input.addEventListener(ev, () => {
+          clearTimeout(draftTimer);
+          draftTimer = setTimeout(saveDraft, 300);
+        });
+      }
+
+      // Initial load
+      restoreDraft();
+      renderHistory();
+
+      // Cross-tab sync
+      window.addEventListener('storage', (e)=>{
+        if (e.key === KEY_HISTORY) renderHistory();
+        if (e.key === KEY_DRAFT) restoreDraft();
+      });
     });
   </script>
 </body>
