@@ -1,4 +1,4 @@
-<!-- index.html : Math → SVG Generator with localStorage history & autosave draft -->
+<!-- index.html : Math → SVG Generator with localStorage history, autosave draft, and history thumbnails -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -104,6 +104,43 @@
     function fmt(ts){ try { return new Date(ts).toLocaleString(); } catch { return ts; } }
     function escapeHtml(s){ return (s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+    // --- SVG sanitize & element helpers (for safety and thumbnails) ---
+    function sanitizeSVG(svgString) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgString, 'image/svg+xml');
+      const svg = doc.documentElement;
+
+      ['script', 'foreignObject'].forEach(tag => {
+        doc.querySelectorAll(tag).forEach(n => n.remove());
+      });
+
+      doc.querySelectorAll('*').forEach(el => {
+        [...el.attributes].forEach(attr => {
+          const name = attr.name.toLowerCase();
+          const val  = attr.value || '';
+          if (name.startsWith('on')) el.removeAttribute(attr.name);
+          if ((name === 'href' || name.endsWith(':href')) && /^javascript:/i.test(val)) {
+            el.removeAttribute(attr.name);
+          }
+        });
+      });
+
+      return new XMLSerializer().serializeToString(svg);
+    }
+
+    function svgStringToElement(svgString) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgString, 'image/svg+xml');
+      const svg = doc.documentElement;
+      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      svg.removeAttribute('width');
+      svg.removeAttribute('height');
+      svg.style.maxWidth = '100%';
+      svg.style.maxHeight = '100%';
+      return svg;
+    }
+
     function loadHistory(){
       try { return JSON.parse(localStorage.getItem(KEY_HISTORY) || '[]'); }
       catch { return []; }
@@ -112,19 +149,25 @@
       localStorage.setItem(KEY_HISTORY, JSON.stringify(arr.slice(0, MAX_ITEMS)));
       renderHistory();
     }
-    function addSnapshot(tex){
-      if (!tex) return;
+    function addSnapshot(tex, svgString){
+      const t = (tex || '').trim();
+      if (!t) return;
       const arr = loadHistory();
-      arr.unshift({ id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()), ts: nowISO(), tex });
+      arr.unshift({
+        id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+        ts: nowISO(),
+        tex: t,
+        svg: svgString || ''
+      });
       saveHistory(arr);
     }
-    function addSnapshotIfChanged(tex){
+    function addSnapshotIfChanged(tex, svgString){
       const t = (tex || '').trim();
       if (!t) return;
       const arr = loadHistory();
       const last = arr[0];
       if (!last || (last.tex ?? '') !== t) {
-        addSnapshot(t);
+        addSnapshot(t, svgString || '');
       }
     }
     function removeSnapshot(id){
@@ -146,6 +189,9 @@
         li.className = 'border rounded-lg p-3';
         li.innerHTML = `
           <div class="flex items-start justify-between gap-3">
+            <div class="shrink-0 w-28 h-20 border rounded bg-white overflow-hidden flex items-center justify-center">
+              <div class="thumb w-full h-full"></div>
+            </div>
             <div class="grow">
               <div class="text-xs text-gray-500 mb-1">${escapeHtml(fmt(item.ts))}</div>
               <pre class="text-sm overflow-x-auto whitespace-pre-wrap">${escapeHtml(item.tex)}</pre>
@@ -156,6 +202,17 @@
             </div>
           </div>
         `;
+        // thumbnail
+        const thumb = li.querySelector('.thumb');
+        try {
+          if (item.svg) {
+            thumb.appendChild(svgStringToElement(item.svg));
+          } else if (window.MathJax?.tex2svg) {
+            const tmp = window.MathJax.tex2svg(item.tex, { display: true }).querySelector('svg');
+            const s = sanitizeSVG(new XMLSerializer().serializeToString(tmp));
+            thumb.appendChild(svgStringToElement(s));
+          }
+        } catch {}
         $list.append(li);
       }
     }
@@ -200,21 +257,26 @@
         $preview.innerHTML = '';
         $preview.appendChild(svgEl.cloneNode(true));
 
-        const svgString = new XMLSerializer().serializeToString(svgEl);
-        currentSvgString = svgString;
-        setBlobForDownload(svgString);
-        addSnapshotIfChanged(tex);
+        const svgStringRaw = new XMLSerializer().serializeToString(svgEl);
+        const safeSvg = sanitizeSVG(svgStringRaw);
+
+        currentSvgString = safeSvg;
+        setBlobForDownload(safeSvg);
+
+        // Auto-snapshot (text + SVG) after each generation
+        addSnapshotIfChanged(tex, safeSvg);
       };
 
       // Clipboard copy
       const copyToClipboard = async () => {
         if (!currentSvgString) return;
         try {
+          const safe = sanitizeSVG(currentSvgString);
           if (navigator.clipboard?.write) {
-            const blob = new Blob([currentSvgString], { type: 'image/svg+xml' });
+            const blob = new Blob([safe], { type: 'image/svg+xml' });
             await navigator.clipboard.write([new ClipboardItem({ 'image/svg+xml': blob })]);
           } else {
-            await navigator.clipboard.writeText(currentSvgString);
+            await navigator.clipboard.writeText(safe);
           }
           $copyBtn.classList.add('bg-green-600');
           setTimeout(() => $copyBtn.classList.remove('bg-green-600'), 800);
