@@ -9,11 +9,14 @@
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- MathJax configuration: enable \bm -->
+  <!-- MathJax configuration: enable \bm and \boldsymbol -->
   <script>
     window.MathJax = {
+      loader: {
+        load: ['[tex]/ams', '[tex]/bm']
+      },
       tex: {
-        packages: { '[+]': ['bm'] },
+        packages: { '[+]': ['ams', 'bm'] },
         macros: { bm: ["\\boldsymbol{#1}", 1] }
       }
     };
