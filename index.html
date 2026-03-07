@@ -11,18 +11,26 @@
 
   <!-- MathJax configuration: enable \bm and \boldsymbol -->
   <script>
-    window.MathJax = {
+    window.__createMathJaxConfig = () => ({
       loader: {
-        load: ['[tex]/ams', '[tex]/bm']
+        load: ['[tex]/ams', '[tex]/boldsymbol']
       },
       tex: {
-        packages: { '[+]': ['ams', 'bm'] },
+        packages: { '[+]': ['ams', 'boldsymbol'] },
         macros: { bm: ["\\boldsymbol{#1}", 1] }
       }
-    };
+    });
+    window.MathJax = window.__createMathJaxConfig();
+    window.__mathJaxLoadState = 'loading';
+    window.__mathJaxLoadError = '';
   </script>
-  <!-- MathJax (SVG output) -->
-  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+  <script
+    id="MathJax-script"
+    defer
+    src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"
+    onload="window.__mathJaxLoadState='loaded'"
+    onerror="window.__mathJaxLoadState='error';window.__mathJaxLoadError='Failed to load MathJax from cdn.jsdelivr.net.'"
+  ></script>
 </head>
 <body class="min-h-screen bg-gray-50 flex flex-col items-center py-8 px-4">
   <header class="mb-6 text-center">
@@ -40,27 +48,31 @@
       <div id="draftStatus" class="text-sm text-gray-500 mt-1">Autosaving draft to browser…</div>
     </label>
 
-    <!-- Buttons -->
-    <div class="flex flex-wrap items-center gap-3">
-      <button id="generate-btn" aria-label="Generate SVG"
-        class="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg shadow">
-        Generate / Update
-      </button>
-      <button id="copy-btn" aria-label="Copy SVG to clipboard"
-        class="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40" disabled>
-        Copy to Clipboard
-      </button>
-      <a id="download-link" aria-label="Download SVG" href="#" download="formula.svg"
-         class="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg shadow opacity-40 pointer-events-none hover:bg-indigo-700">
-        Download SVG
-      </a>
-    </div>
+	    <!-- Buttons -->
+		    <div class="flex flex-wrap items-center gap-3">
+		      <button id="generate-btn" aria-label="Generate SVG"
+		        class="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40 disabled:cursor-not-allowed"
+		        disabled>
+		        Generate / Update
+		      </button>
+	      <button id="copy-btn" aria-label="Copy SVG to clipboard"
+	        class="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40" disabled>
+	        Copy to Clipboard
+	      </button>
+	      <a id="download-link" aria-label="Download SVG" href="#" download="formula.svg"
+	         class="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg shadow opacity-40 pointer-events-none hover:bg-indigo-700">
+	        Download SVG
+	      </a>
+	    </div>
+	    <div id="statusMessage" class="text-sm text-slate-600" role="status" aria-live="polite">Loading MathJax…</div>
 
-    <!-- Preview -->
-    <section>
-      <h2 class="text-lg font-medium mb-2">Preview</h2>
-      <div id="preview" class="min-h-[4rem] p-4 bg-white border rounded-lg overflow-auto"></div>
-    </section>
+	    <!-- Preview -->
+	    <section>
+	      <h2 class="text-lg font-medium mb-2">Preview</h2>
+	      <div id="preview" class="min-h-[4rem] p-4 bg-white border rounded-lg overflow-auto">
+	        <p class="text-sm text-gray-500">Preview will appear here after generation.</p>
+	      </div>
+	    </section>
 
     <!-- History panel -->
     <section class="bg-white border rounded-lg p-4">
@@ -79,276 +91,504 @@
     </section>
   </main>
 
-  <script>
-    // ----- Constants -----
-    const KEY_HISTORY = 'mathsvg.history.v1';
-    const KEY_DRAFT   = 'mathsvg.draft.v1';
-    const MAX_ITEMS   = 200;
-    const MAX_LENGTH  = 20000; // 20 kB input guard
+		  <script>
+		    // ----- Constants -----
+			    const KEY_HISTORY = 'mathsvg.history.v1';
+			    const KEY_DRAFT   = 'mathsvg.draft.v1';
+			    const MAX_ITEMS   = 200;
+			    const MAX_LENGTH  = 20000; // 20 kB input guard
+			    const MATHJAX_STARTUP_TIMEOUT = 12000;
 
-    // ----- Helpers -----
-    const $ = sel => document.querySelector(sel);
-    const $list = $('#historyList');
-    const $count = $('#histCount');
-    const $input = $('#latex-input');
-    const $draftStatus = $('#draftStatus');
-    const $preview = $('#preview');
-    const $link = $('#download-link');
-    const $genBtn = $('#generate-btn');
-    const $copyBtn = $('#copy-btn');
-    const $exportBtn = $('#exportBtn');
-    const $clearBtn = $('#clearBtn');
+	    // ----- Helpers -----
+	    const $ = sel => document.querySelector(sel);
+	    const $list = $('#historyList');
+	    const $count = $('#histCount');
+	    const $input = $('#latex-input');
+	    const $draftStatus = $('#draftStatus');
+	    const $preview = $('#preview');
+	    const $link = $('#download-link');
+	    const $genBtn = $('#generate-btn');
+	    const $copyBtn = $('#copy-btn');
+	    const $exportBtn = $('#exportBtn');
+	    const $clearBtn = $('#clearBtn');
+	    const $status = $('#statusMessage');
 
-    let currentSvgString = '';
-    let currentBlobUrl = null;
-    let draftTimer = null;
+	    let currentSvgString = '';
+	    let currentBlobUrl = null;
+	    let draftTimer = null;
+		    let mathJaxReady = false;
 
-    function nowISO(){ return new Date().toISOString(); }
-    function fmt(ts){ try { return new Date(ts).toLocaleString(); } catch { return ts; } }
-    function escapeHtml(s){ return (s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+	    function nowISO(){ return new Date().toISOString(); }
+	    function fmt(ts){ try { return new Date(ts).toLocaleString(); } catch { return ts; } }
+	    function wait(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+	    function escapeHtml(s){ return (s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-    // --- SVG sanitize & element helpers (for safety and thumbnails) ---
-    function sanitizeSVG(svgString) {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(svgString, 'image/svg+xml');
-      const svg = doc.documentElement;
+	    function setStatus(text, tone = 'neutral'){
+	      const colors = {
+	        neutral: '#475569',
+	        success: '#166534',
+	        error: '#b91c1c'
+	      };
+	      $status.textContent = text;
+	      $status.style.color = colors[tone] || colors.neutral;
+	    }
 
-      ['script', 'foreignObject'].forEach(tag => {
-        doc.querySelectorAll(tag).forEach(n => n.remove());
-      });
+	    function setPreviewMessage(text, isError = false){
+	      $preview.innerHTML = '';
+	      const p = document.createElement('p');
+	      p.className = 'text-sm';
+	      p.textContent = text;
+	      p.style.color = isError ? '#b91c1c' : '#6b7280';
+	      $preview.appendChild(p);
+	    }
 
-      doc.querySelectorAll('*').forEach(el => {
-        [...el.attributes].forEach(attr => {
-          const name = attr.name.toLowerCase();
-          const val  = attr.value || '';
-          if (name.startsWith('on')) el.removeAttribute(attr.name);
-          if ((name === 'href' || name.endsWith(':href')) && /^javascript:/i.test(val)) {
-            el.removeAttribute(attr.name);
-          }
-        });
-      });
+	    function setGenerateEnabled(enabled){
+	      $genBtn.disabled = !enabled;
+	    }
 
-      return new XMLSerializer().serializeToString(svg);
-    }
+	    function resetOutputState(){
+	      currentSvgString = '';
+	      if (currentBlobUrl) {
+	        URL.revokeObjectURL(currentBlobUrl);
+	        currentBlobUrl = null;
+	      }
+	      $link.href = '#';
+	      $link.classList.add('opacity-40', 'pointer-events-none');
+	      $copyBtn.disabled = true;
+	    }
 
-    function svgStringToElement(svgString) {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(svgString, 'image/svg+xml');
-      const svg = doc.documentElement;
-      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-      svg.removeAttribute('width');
-      svg.removeAttribute('height');
-      svg.style.maxWidth = '100%';
-      svg.style.maxHeight = '100%';
-      return svg;
-    }
+	    function flashCopySuccess(){
+	      $copyBtn.classList.add('bg-green-600');
+	      setTimeout(() => $copyBtn.classList.remove('bg-green-600'), 800);
+	    }
 
-    function loadHistory(){
-      try { return JSON.parse(localStorage.getItem(KEY_HISTORY) || '[]'); }
-      catch { return []; }
-    }
-    function saveHistory(arr){
-      localStorage.setItem(KEY_HISTORY, JSON.stringify(arr.slice(0, MAX_ITEMS)));
-      renderHistory();
-    }
-    function addSnapshot(tex, svgString){
-      const t = (tex || '').trim();
-      if (!t) return;
-      const arr = loadHistory();
-      arr.unshift({
-        id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
-        ts: nowISO(),
-        tex: t,
-        svg: svgString || ''
-      });
-      saveHistory(arr);
-    }
-    function addSnapshotIfChanged(tex, svgString){
-      const t = (tex || '').trim();
-      if (!t) return;
-      const arr = loadHistory();
-      const last = arr[0];
-      if (!last || (last.tex ?? '') !== t) {
-        addSnapshot(t, svgString || '');
-      }
-    }
-    function removeSnapshot(id){
-      saveHistory(loadHistory().filter(x => x.id !== id));
-    }
-    function clearAllHistory(){
-      if (confirm('Delete all history in this browser?')) {
-        localStorage.removeItem(KEY_HISTORY);
-        renderHistory();
-      }
-    }
+	    // --- SVG sanitize & element helpers (for safety and thumbnails) ---
+	    function sanitizeSVG(svgString) {
+	      const parser = new DOMParser();
+	      const doc = parser.parseFromString(svgString, 'image/svg+xml');
+	      const svg = doc.documentElement;
+	      const parserError = doc.getElementsByTagName('parsererror')[0];
+	      if (parserError || svg?.nodeName?.toLowerCase() !== 'svg') {
+	        throw new Error('Generated SVG could not be parsed.');
+	      }
 
-    function renderHistory(){
-      const arr = loadHistory();
-      $list.innerHTML = '';
-      $count.textContent = `(${arr.length} / ${MAX_ITEMS})`;
-      for (const item of arr){
-        const li = document.createElement('li');
-        li.className = 'border rounded-lg p-3';
-        li.innerHTML = `
-          <div class="flex items-start justify-between gap-3">
-            <div class="shrink-0 w-28 h-20 border rounded bg-white overflow-hidden flex items-center justify-center">
-              <div class="thumb w-full h-full"></div>
-            </div>
-            <div class="grow">
-              <div class="text-xs text-gray-500 mb-1">${escapeHtml(fmt(item.ts))}</div>
-              <pre class="text-sm overflow-x-auto whitespace-pre-wrap">${escapeHtml(item.tex)}</pre>
-            </div>
-            <div class="shrink-0 flex flex-col gap-2">
-              <button data-act="restore" data-id="${item.id}" class="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 border">Restore</button>
-              <button data-act="delete"  data-id="${item.id}" class="px-3 py-1.5 rounded-md bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700">Delete</button>
-            </div>
-          </div>
-        `;
-        // thumbnail
-        const thumb = li.querySelector('.thumb');
-        try {
-          if (item.svg) {
-            thumb.appendChild(svgStringToElement(item.svg));
-          } else if (window.MathJax?.tex2svg) {
-            const tmp = window.MathJax.tex2svg(item.tex, { display: true }).querySelector('svg');
-            const s = sanitizeSVG(new XMLSerializer().serializeToString(tmp));
-            thumb.appendChild(svgStringToElement(s));
-          }
-        } catch {}
-        $list.append(li);
-      }
-    }
+	      ['script', 'foreignObject'].forEach(tag => {
+	        doc.querySelectorAll(tag).forEach(n => n.remove());
+	      });
 
-    function setBlobForDownload(svgString){
-      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
-      const blob = new Blob([svgString], { type: 'image/svg+xml' });
-      currentBlobUrl = URL.createObjectURL(blob);
-      $link.href = currentBlobUrl;
-      $link.classList.remove('opacity-40', 'pointer-events-none');
-      $copyBtn.disabled = false;
-    }
+	      doc.querySelectorAll('*').forEach(el => {
+	        [...el.attributes].forEach(attr => {
+	          const name = attr.name.toLowerCase();
+	          const val  = attr.value || '';
+	          if (name.startsWith('on')) el.removeAttribute(attr.name);
+	          if ((name === 'href' || name.endsWith(':href')) && /^javascript:/i.test(val)) {
+	            el.removeAttribute(attr.name);
+	          }
+	        });
+	      });
 
-    function setDraftStatus(text){
-      $draftStatus.textContent = text;
-    }
+	      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+	      return new XMLSerializer().serializeToString(svg);
+	    }
 
-    // ----- MathJax Ready -----
-    function ready(cb) {
-      if (window.MathJax?.startup?.promise) { MathJax.startup.promise.then(cb); }
-      else { setTimeout(() => ready(cb), 50); }
-    }
+	    function svgStringToElement(svgString) {
+	      const parser = new DOMParser();
+	      const doc = parser.parseFromString(svgString, 'image/svg+xml');
+	      const svg = doc.documentElement;
+	      const parserError = doc.getElementsByTagName('parsererror')[0];
+	      if (parserError || svg?.nodeName?.toLowerCase() !== 'svg') {
+	        throw new Error('Stored SVG is invalid.');
+	      }
+	      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+	      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+	      svg.removeAttribute('width');
+	      svg.removeAttribute('height');
+	      svg.style.maxWidth = '100%';
+	      svg.style.maxHeight = '100%';
+	      return svg;
+	    }
 
-    ready(() => {
-      // Convert LaTeX to SVGElement
-      const texToSvg = (tex) => {
-        const wrapper = MathJax.tex2svg(tex, { display: true });
-        const svg = wrapper.querySelector('svg');
-        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-        return svg;
-      };
+	    function loadHistory(){
+	      try { return JSON.parse(localStorage.getItem(KEY_HISTORY) || '[]'); }
+	      catch { return []; }
+	    }
 
-      // Generate preview and prepare download/copy
-      const generate = () => {
-        const tex = $input.value.trim();
-        if (!tex) return;
-        if (tex.length > MAX_LENGTH) {
-          alert('Input is too long (> 20 kB). Please shorten it.');
-          return;
-        }
-        const svgEl = texToSvg(tex);
-        $preview.innerHTML = '';
-        $preview.appendChild(svgEl.cloneNode(true));
+	    function saveHistory(arr){
+	      try {
+	        localStorage.setItem(KEY_HISTORY, JSON.stringify(arr.slice(0, MAX_ITEMS)));
+	      } catch {
+	        setStatus('History could not be saved in this browser.', 'error');
+	      }
+	      renderHistory();
+	    }
 
-        const svgStringRaw = new XMLSerializer().serializeToString(svgEl);
-        const safeSvg = sanitizeSVG(svgStringRaw);
+	    function addSnapshot(tex, svgString){
+	      const t = (tex || '').trim();
+	      if (!t) return;
+	      const arr = loadHistory();
+	      arr.unshift({
+	        id: globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : String(Date.now()),
+	        ts: nowISO(),
+	        tex: t,
+	        svg: svgString || ''
+	      });
+	      saveHistory(arr);
+	    }
 
-        currentSvgString = safeSvg;
-        setBlobForDownload(safeSvg);
+	    function addSnapshotIfChanged(tex, svgString){
+	      const t = (tex || '').trim();
+	      if (!t) return;
+	      const arr = loadHistory();
+	      const last = arr[0];
+	      if (!last || (last.tex ?? '') !== t) {
+	        addSnapshot(t, svgString || '');
+	      }
+	    }
 
-        // Auto-snapshot (text + SVG) after each generation
-        addSnapshotIfChanged(tex, safeSvg);
-      };
+	    function removeSnapshot(id){
+	      saveHistory(loadHistory().filter(x => x.id !== id));
+	      setStatus('History entry deleted.', 'success');
+	    }
 
-      // Clipboard copy
-      const copyToClipboard = async () => {
-        if (!currentSvgString) return;
-        try {
-          const safe = sanitizeSVG(currentSvgString);
-          if (navigator.clipboard?.write) {
-            const blob = new Blob([safe], { type: 'image/svg+xml' });
-            await navigator.clipboard.write([new ClipboardItem({ 'image/svg+xml': blob })]);
-          } else {
-            await navigator.clipboard.writeText(safe);
-          }
-          $copyBtn.classList.add('bg-green-600');
-          setTimeout(() => $copyBtn.classList.remove('bg-green-600'), 800);
-        } catch (err) {
-          alert('Failed to copy: ' + err);
-        }
-      };
+	    function clearAllHistory(){
+	      if (!confirm('Delete all history in this browser?')) return;
+	      try {
+	        localStorage.removeItem(KEY_HISTORY);
+	      } catch {
+	        setStatus('Failed to clear history in this browser.', 'error');
+	      }
+	      renderHistory();
+	      setStatus('History cleared.', 'success');
+	    }
 
-      // Draft autosave
-      function saveDraft(){
-        const draft = { tex: $input.value };
-        try { localStorage.setItem(KEY_DRAFT, JSON.stringify(draft)); } catch {}
-        setDraftStatus('Draft saved locally');
-      }
-      function restoreDraft(){
-        try {
-          const d = JSON.parse(localStorage.getItem(KEY_DRAFT) || 'null');
-          if (d && typeof d.tex === 'string') {
-            $input.value = d.tex;
-            setDraftStatus('Draft restored from localStorage');
-          } else {
-            setDraftStatus('Autosaving draft to browser…');
-          }
-        } catch {
-          setDraftStatus('Autosaving draft to browser…');
-        }
-      }
+	    function renderHistory(){
+	      const arr = loadHistory();
+	      $list.innerHTML = '';
+	      $count.textContent = `(${arr.length} / ${MAX_ITEMS})`;
+	      for (const item of arr){
+	        const li = document.createElement('li');
+	        li.className = 'border rounded-lg p-3';
+	        li.innerHTML = `
+	          <div class="flex items-start justify-between gap-3">
+	            <div class="shrink-0 w-28 h-20 border rounded bg-white overflow-hidden flex items-center justify-center">
+	              <div class="thumb w-full h-full"></div>
+	            </div>
+	            <div class="grow">
+	              <div class="text-xs text-gray-500 mb-1">${escapeHtml(fmt(item.ts))}</div>
+	              <pre class="text-sm overflow-x-auto whitespace-pre-wrap">${escapeHtml(item.tex)}</pre>
+	            </div>
+	            <div class="shrink-0 flex flex-col gap-2">
+	              <button data-act="restore" data-id="${item.id}" class="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 border">Restore</button>
+	              <button data-act="delete"  data-id="${item.id}" class="px-3 py-1.5 rounded-md bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700">Delete</button>
+	            </div>
+	          </div>
+	        `;
 
-      // Wire events
-      $genBtn.addEventListener('click', generate);
-      $copyBtn.addEventListener('click', copyToClipboard);
-      $exportBtn.addEventListener('click', () => {
-        const blob = new Blob([localStorage.getItem(KEY_HISTORY) || '[]'], { type:'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.download = 'mathsvg_history.json';
-        a.href = url;
-        a.click();
-        URL.revokeObjectURL(url);
-      });
-      $clearBtn.addEventListener('click', clearAllHistory);
-      $list.addEventListener('click', (e)=>{
-        const btn = e.target.closest('button'); if (!btn) return;
-        const id = btn.dataset.id; const act = btn.dataset.act;
-        if (act === 'delete') removeSnapshot(id);
-        if (act === 'restore') {
-          const item = loadHistory().find(x=>x.id===id);
-          if (item){ $input.value = item.tex; saveDraft(); $input.focus(); }
-        }
-      });
+	        const thumb = li.querySelector('.thumb');
+	        try {
+	          if (item.svg) {
+	            thumb.appendChild(svgStringToElement(item.svg));
+	          } else if (mathJaxReady && window.MathJax?.tex2svg) {
+	            const tmp = window.MathJax.tex2svg(item.tex, { display: true }).querySelector('svg');
+	            const s = sanitizeSVG(new XMLSerializer().serializeToString(tmp));
+	            thumb.appendChild(svgStringToElement(s));
+	          }
+	        } catch {}
 
-      // Input debounced autosave
-      for (const ev of ['input','change']) {
-        $input.addEventListener(ev, () => {
-          clearTimeout(draftTimer);
-          draftTimer = setTimeout(saveDraft, 300);
-        });
-      }
+	        $list.append(li);
+	      }
+	    }
 
-      // Initial load
-      restoreDraft();
-      renderHistory();
+	    function setBlobForDownload(svgString){
+	      if (currentBlobUrl) {
+	        URL.revokeObjectURL(currentBlobUrl);
+	      }
+	      const blob = new Blob([svgString], { type: 'image/svg+xml' });
+	      currentBlobUrl = URL.createObjectURL(blob);
+	      $link.href = currentBlobUrl;
+	      $link.classList.remove('opacity-40', 'pointer-events-none');
+	      $copyBtn.disabled = false;
+	    }
 
-      // Cross-tab sync
-      window.addEventListener('storage', (e)=>{
-        if (e.key === KEY_HISTORY) renderHistory();
-        if (e.key === KEY_DRAFT) restoreDraft();
-      });
-    });
-  </script>
+	    function setDraftStatus(text){
+	      $draftStatus.textContent = text;
+	    }
+
+	    function saveDraft(){
+	      const draft = { tex: $input.value };
+	      try {
+	        localStorage.setItem(KEY_DRAFT, JSON.stringify(draft));
+	        setDraftStatus('Draft saved locally');
+	      } catch {
+	        setDraftStatus('Draft could not be saved in this browser');
+	      }
+	    }
+
+	    function restoreDraft(){
+	      try {
+	        const d = JSON.parse(localStorage.getItem(KEY_DRAFT) || 'null');
+	        if (d && typeof d.tex === 'string') {
+	          $input.value = d.tex;
+	          setDraftStatus('Draft restored from localStorage');
+	        } else {
+	          setDraftStatus('Autosaving draft to browser…');
+	        }
+	      } catch {
+	        setDraftStatus('Autosaving draft to browser…');
+	      }
+	    }
+
+	    function showSvg(svgString){
+	      const safeSvg = sanitizeSVG(svgString);
+	      $preview.innerHTML = '';
+	      $preview.appendChild(svgStringToElement(safeSvg));
+	      currentSvgString = safeSvg;
+	      setBlobForDownload(safeSvg);
+	      return safeSvg;
+	    }
+
+		    async function waitForMathJax(timeoutMs = MATHJAX_STARTUP_TIMEOUT) {
+		      const deadline = Date.now() + timeoutMs;
+		      while (Date.now() < deadline) {
+		        if (window.__mathJaxLoadState === 'error') {
+		          throw new Error(window.__mathJaxLoadError || 'Failed to load MathJax from the CDN.');
+		        }
+		        if (window.MathJax?.startup?.promise) {
+		          await window.MathJax.startup.promise;
+		          if (typeof window.MathJax.tex2svg !== 'function' && typeof window.MathJax.tex2svgPromise !== 'function') {
+		            throw new Error('MathJax loaded without SVG rendering support.');
+		          }
+		          mathJaxReady = true;
+		          return true;
+		        }
+		        await wait(50);
+		      }
+		      throw new Error('MathJax is still loading or blocked by the browser.');
+		    }
+
+		    async function initializeMathJax(){
+		      setStatus('Loading MathJax…');
+		      setGenerateEnabled(false);
+		      try {
+		        await waitForMathJax();
+		        renderHistory();
+		        setGenerateEnabled(true);
+		        setStatus('MathJax ready.', 'success');
+		      } catch (err) {
+		        mathJaxReady = false;
+		        setGenerateEnabled(false);
+		        const message = err instanceof Error ? err.message : 'MathJax failed to initialize.';
+		        setPreviewMessage('MathJax could not be loaded. Check network access or IDE preview CSP, then reload.', true);
+		        setStatus(message, 'error');
+		      }
+		    }
+
+		    async function renderTexToSvg(tex) {
+		      if (!mathJaxReady || !window.MathJax) {
+		        throw new Error('MathJax is still loading.');
+		      }
+	      const wrapper = typeof window.MathJax.tex2svgPromise === 'function'
+	        ? await window.MathJax.tex2svgPromise(tex, { display: true })
+	        : window.MathJax.tex2svg(tex, { display: true });
+	      const svg = wrapper?.querySelector('svg');
+	      if (!svg) {
+	        throw new Error('MathJax did not return SVG output.');
+	      }
+	      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+	      return svg;
+	    }
+
+	    async function generate({ texOverride = null, saveSnapshot = true } = {}){
+	      const tex = (texOverride ?? $input.value).trim();
+	      if (!tex) {
+	        resetOutputState();
+	        setPreviewMessage('Enter a LaTeX equation to generate an SVG.');
+	        setStatus('No LaTeX input provided.', 'neutral');
+	        return false;
+	      }
+	      if (tex.length > MAX_LENGTH) {
+	        resetOutputState();
+	        setPreviewMessage('Input is too long. Shorten it to less than 20 kB.', true);
+	        setStatus('Input is too long (> 20 kB). Please shorten it.', 'error');
+	        return false;
+	      }
+	      if (!mathJaxReady) {
+	        setStatus('MathJax is not ready.', 'error');
+	        return false;
+	      }
+		      setStatus('Generating SVG…');
+		      setGenerateEnabled(false);
+
+		      try {
+		        const svgEl = await renderTexToSvg(tex);
+		        const svgStringRaw = new XMLSerializer().serializeToString(svgEl);
+		        const safeSvg = showSvg(svgStringRaw);
+	        if (saveSnapshot) {
+	          addSnapshotIfChanged(tex, safeSvg);
+	        }
+	        setStatus('SVG updated.', 'success');
+	        return true;
+	      } catch (err) {
+	        const message = err instanceof Error ? err.message : 'Failed to generate SVG.';
+	        resetOutputState();
+	        setPreviewMessage(message, true);
+	        setStatus(message, 'error');
+	        return false;
+	      } finally {
+	        setGenerateEnabled(mathJaxReady);
+	      }
+	    }
+
+	    function copyTextFallback(text) {
+	      const textarea = document.createElement('textarea');
+	      textarea.value = text;
+	      textarea.setAttribute('readonly', '');
+	      textarea.style.position = 'fixed';
+	      textarea.style.opacity = '0';
+	      textarea.style.pointerEvents = 'none';
+	      document.body.appendChild(textarea);
+	      textarea.select();
+	      const copied = document.execCommand('copy');
+	      document.body.removeChild(textarea);
+	      if (!copied) {
+	        throw new Error('Clipboard copy is unavailable in this browser.');
+	      }
+	    }
+
+	    async function copyToClipboard(){
+	      if (!currentSvgString) return;
+	      const safe = sanitizeSVG(currentSvgString);
+
+	      try {
+	        if (window.ClipboardItem && navigator.clipboard?.write) {
+	          const item = new ClipboardItem({
+	            'image/svg+xml': new Blob([safe], { type: 'image/svg+xml' }),
+	            'text/plain': new Blob([safe], { type: 'text/plain' })
+	          });
+	          await navigator.clipboard.write([item]);
+	          flashCopySuccess();
+	          setStatus('SVG copied to the clipboard.', 'success');
+	          return;
+	        }
+
+	        if (navigator.clipboard?.writeText) {
+	          await navigator.clipboard.writeText(safe);
+	          flashCopySuccess();
+	          setStatus('SVG source copied as text.', 'success');
+	          return;
+	        }
+
+	        copyTextFallback(safe);
+	        flashCopySuccess();
+	        setStatus('SVG source copied as text.', 'success');
+	      } catch (err) {
+	        try {
+	          if (navigator.clipboard?.writeText) {
+	            await navigator.clipboard.writeText(safe);
+	          } else {
+	            copyTextFallback(safe);
+	          }
+	          flashCopySuccess();
+	          setStatus('Rich SVG copy is not supported here. SVG source was copied as text.', 'success');
+	        } catch (fallbackErr) {
+	          const message = fallbackErr instanceof Error
+	            ? fallbackErr.message
+	            : err instanceof Error
+	              ? err.message
+	              : 'Clipboard copy failed.';
+	          setStatus(message, 'error');
+	          alert('Failed to copy: ' + message);
+	        }
+	      }
+	    }
+
+		    async function initializeApp(){
+		      restoreDraft();
+		      renderHistory();
+		      resetOutputState();
+		      setPreviewMessage('Preview will appear here after generation.');
+		      setGenerateEnabled(false);
+		      void initializeMathJax();
+		    }
+
+	    // Wire events
+	    $genBtn.addEventListener('click', () => {
+	      void generate();
+	    });
+
+	    $copyBtn.addEventListener('click', () => {
+	      void copyToClipboard();
+	    });
+
+	    $exportBtn.addEventListener('click', () => {
+	      try {
+	        const blob = new Blob([localStorage.getItem(KEY_HISTORY) || '[]'], { type:'application/json' });
+	        const url = URL.createObjectURL(blob);
+	        const a = document.createElement('a');
+	        a.download = 'mathsvg_history.json';
+	        a.href = url;
+	        a.click();
+	        URL.revokeObjectURL(url);
+	        setStatus('History exported.', 'success');
+	      } catch {
+	        setStatus('History export failed.', 'error');
+	      }
+	    });
+
+	    $clearBtn.addEventListener('click', clearAllHistory);
+
+	    $list.addEventListener('click', async (e) => {
+	      const btn = e.target.closest('button');
+	      if (!btn) return;
+
+	      const id = btn.dataset.id;
+	      const act = btn.dataset.act;
+
+	      if (act === 'delete') {
+	        removeSnapshot(id);
+	        return;
+	      }
+
+	      if (act === 'restore') {
+	        const item = loadHistory().find(x => x.id === id);
+	        if (!item) return;
+
+	        $input.value = item.tex;
+	        saveDraft();
+	        $input.focus();
+
+	        try {
+	          if (item.svg) {
+	            showSvg(item.svg);
+	            setStatus('History snapshot restored.', 'success');
+	          } else {
+	            const ok = await generate({ texOverride: item.tex, saveSnapshot: false });
+	            if (ok) {
+	              setStatus('History snapshot restored.', 'success');
+	            }
+	          }
+	        } catch (err) {
+	          const message = err instanceof Error ? err.message : 'Failed to restore this history item.';
+	          setStatus(message, 'error');
+	        }
+	      }
+	    });
+
+	    // Input debounced autosave
+	    for (const ev of ['input','change']) {
+	      $input.addEventListener(ev, () => {
+	        clearTimeout(draftTimer);
+	        draftTimer = setTimeout(saveDraft, 300);
+	      });
+	    }
+
+	    // Cross-tab sync
+	    window.addEventListener('storage', (e) => {
+	      if (e.key === KEY_HISTORY) renderHistory();
+	      if (e.key === KEY_DRAFT) restoreDraft();
+	    });
+
+	    void initializeApp();
+	  </script>
 </body>
 </html>
