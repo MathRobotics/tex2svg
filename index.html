@@ -35,7 +35,7 @@
 <body class="min-h-screen bg-gray-50 flex flex-col items-center py-8 px-4">
   <header class="mb-6 text-center">
     <h1 class="text-3xl font-semibold">Math → SVG Generator</h1>
-    <p class="text-gray-600 mt-2">Enter a LaTeX equation, generate an SVG, then download it or copy it.</p>
+    <p class="text-gray-600 mt-2">Enter a LaTeX equation, generate an SVG, then copy a PowerPoint-friendly image or download the SVG.</p>
   </header>
 
   <main class="w-full max-w-4xl flex flex-col gap-6">
@@ -55,9 +55,14 @@
 		        disabled>
 		        Generate / Update
 		      </button>
-	      <button id="copy-btn" aria-label="Copy SVG to clipboard"
+	      <button id="copy-btn" aria-label="Copy image for PowerPoint"
 	        class="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40" disabled>
-	        Copy to Clipboard
+	        Copy for PowerPoint
+	      </button>
+	      <button id="download-png-btn" aria-label="Download PNG"
+	        class="inline-flex items-center gap-2 bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-lg shadow disabled:opacity-40 disabled:cursor-not-allowed"
+	        disabled>
+	        Download PNG
 	      </button>
 	      <a id="download-link" aria-label="Download SVG" href="#" download="formula.svg"
 	         class="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg shadow opacity-40 pointer-events-none hover:bg-indigo-700">
@@ -65,6 +70,7 @@
 	      </a>
 	    </div>
 	    <div id="statusMessage" class="text-sm text-slate-600" role="status" aria-live="polite">Loading MathJax…</div>
+	    <p class="text-xs text-gray-500">PowerPoint usually pastes the PNG data from the clipboard. Use SVG download when you need a vector file.</p>
 
 	    <!-- Preview -->
 	    <section>
@@ -98,6 +104,9 @@
 			    const MAX_ITEMS   = 200;
 			    const MAX_LENGTH  = 20000; // 20 kB input guard
 			    const MATHJAX_STARTUP_TIMEOUT = 12000;
+			    const PNG_EXPORT_SCALE = 2.5;
+			    const MAX_PNG_DIMENSION = 4096;
+			    const MAX_PNG_PIXELS = 16777216;
 
 	    // ----- Helpers -----
 	    const $ = sel => document.querySelector(sel);
@@ -109,6 +118,7 @@
 	    const $link = $('#download-link');
 	    const $genBtn = $('#generate-btn');
 	    const $copyBtn = $('#copy-btn');
+	    const $downloadPngBtn = $('#download-png-btn');
 	    const $exportBtn = $('#exportBtn');
 	    const $clearBtn = $('#clearBtn');
 	    const $status = $('#statusMessage');
@@ -155,6 +165,7 @@
 	      $link.href = '#';
 	      $link.classList.add('opacity-40', 'pointer-events-none');
 	      $copyBtn.disabled = true;
+	      $downloadPngBtn.disabled = true;
 	    }
 
 	    function flashCopySuccess(){
@@ -162,15 +173,20 @@
 	      setTimeout(() => $copyBtn.classList.remove('bg-green-600'), 800);
 	    }
 
-	    // --- SVG sanitize & element helpers (for safety and thumbnails) ---
-	    function sanitizeSVG(svgString) {
+	    function parseSvg(svgString, errorMessage){
 	      const parser = new DOMParser();
 	      const doc = parser.parseFromString(svgString, 'image/svg+xml');
 	      const svg = doc.documentElement;
 	      const parserError = doc.getElementsByTagName('parsererror')[0];
 	      if (parserError || svg?.nodeName?.toLowerCase() !== 'svg') {
-	        throw new Error('Generated SVG could not be parsed.');
+	        throw new Error(errorMessage);
 	      }
+	      return { doc, svg };
+	    }
+
+	    // --- SVG sanitize & element helpers (for safety and thumbnails) ---
+	    function sanitizeSVG(svgString) {
+	      const { doc, svg } = parseSvg(svgString, 'Generated SVG could not be parsed.');
 
 	      ['script', 'foreignObject'].forEach(tag => {
 	        doc.querySelectorAll(tag).forEach(n => n.remove());
@@ -191,14 +207,37 @@
 	      return new XMLSerializer().serializeToString(svg);
 	    }
 
-	    function svgStringToElement(svgString) {
-	      const parser = new DOMParser();
-	      const doc = parser.parseFromString(svgString, 'image/svg+xml');
-	      const svg = doc.documentElement;
-	      const parserError = doc.getElementsByTagName('parsererror')[0];
-	      if (parserError || svg?.nodeName?.toLowerCase() !== 'svg') {
-	        throw new Error('Stored SVG is invalid.');
+	    function replaceCurrentColor(value, resolvedColor) {
+	      return typeof value === 'string'
+	        ? value.replace(/currentColor/gi, resolvedColor)
+	        : value;
+	    }
+
+	    function getExportColor() {
+	      const previewColor = window.getComputedStyle($preview).color;
+	      return previewColor || 'rgb(0, 0, 0)';
+	    }
+
+	    function cleanupSvgStyle(svg, resolvedColor) {
+	      const styleValue = svg.getAttribute('style');
+	      if (!styleValue) return;
+
+	      const normalized = replaceCurrentColor(styleValue, resolvedColor)
+	        .split(';')
+	        .map(token => token.trim())
+	        .filter(Boolean)
+	        .filter(token => !token.startsWith('vertical-align'))
+	        .join('; ');
+
+	      if (normalized) {
+	        svg.setAttribute('style', normalized);
+	      } else {
+	        svg.removeAttribute('style');
 	      }
+	    }
+
+	    function svgStringToElement(svgString) {
+	      const { svg } = parseSvg(svgString, 'Stored SVG is invalid.');
 	      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
 	      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
 	      svg.removeAttribute('width');
@@ -206,6 +245,148 @@
 	      svg.style.maxWidth = '100%';
 	      svg.style.maxHeight = '100%';
 	      return svg;
+	    }
+
+	    function measureSvgForRaster(svgString){
+	      const { svg } = parseSvg(svgString, 'Stored SVG is invalid.');
+	      const mount = document.createElement('div');
+	      mount.style.position = 'fixed';
+	      mount.style.left = '-10000px';
+	      mount.style.top = '0';
+	      mount.style.visibility = 'hidden';
+	      mount.style.pointerEvents = 'none';
+	      mount.style.whiteSpace = 'nowrap';
+
+	      const measuredSvg = document.importNode(svg, true);
+	      measuredSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+	      mount.appendChild(measuredSvg);
+	      document.body.appendChild(mount);
+
+	      try {
+	        const rect = measuredSvg.getBoundingClientRect();
+	        const width = Math.max(1, Math.ceil(rect.width));
+	        const height = Math.max(1, Math.ceil(rect.height));
+	        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+	          throw new Error('Failed to measure the SVG for PNG export.');
+	        }
+	        return { width, height };
+	      } finally {
+	        document.body.removeChild(mount);
+	      }
+	    }
+
+	    function finalizeSvgForExport(svgString){
+	      const safeSvg = sanitizeSVG(svgString);
+	      const { width, height } = measureSvgForRaster(safeSvg);
+	      const resolvedColor = getExportColor();
+	      const { doc, svg } = parseSvg(safeSvg, 'Stored SVG is invalid.');
+
+	      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+	      svg.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+	      svg.setAttribute('width', String(width));
+	      svg.setAttribute('height', String(height));
+	      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+	      svg.setAttribute('color', resolvedColor);
+	      cleanupSvgStyle(svg, resolvedColor);
+
+	      if (!svg.getAttribute('viewBox')) {
+	        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+	      }
+
+	      doc.querySelectorAll('*').forEach(el => {
+	        ['fill', 'stroke', 'color', 'stop-color'].forEach(name => {
+	          const value = el.getAttribute(name);
+	          if (value) {
+	            el.setAttribute(name, replaceCurrentColor(value, resolvedColor));
+	          }
+	        });
+
+	        const xlinkHref = el.getAttribute('xlink:href');
+	        if (xlinkHref && !el.getAttribute('href')) {
+	          el.setAttribute('href', xlinkHref);
+	        }
+
+	        const styleValue = el.getAttribute('style');
+	        if (styleValue && /currentColor/i.test(styleValue)) {
+	          el.setAttribute('style', replaceCurrentColor(styleValue, resolvedColor));
+	        }
+	      });
+
+	      return new XMLSerializer().serializeToString(svg);
+	    }
+
+	    function serializeSvgWithPixelSize(svgString, width, height){
+	      const { svg } = parseSvg(svgString, 'Stored SVG is invalid.');
+	      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+	      svg.setAttribute('width', String(width));
+	      svg.setAttribute('height', String(height));
+	      return new XMLSerializer().serializeToString(svg);
+	    }
+
+	    function clampPngScale(width, height){
+	      const baseScale = Math.max(1, (window.devicePixelRatio || 1) * PNG_EXPORT_SCALE);
+	      const scaleByDimension = MAX_PNG_DIMENSION / Math.max(width, height);
+	      const scaleByArea = Math.sqrt(MAX_PNG_PIXELS / Math.max(1, width * height));
+	      return Math.max(1, Math.min(baseScale, scaleByDimension, scaleByArea));
+	    }
+
+	    function loadImage(url){
+	      return new Promise((resolve, reject) => {
+	        const img = new Image();
+	        img.onload = () => resolve(img);
+	        img.onerror = () => reject(new Error('Failed to rasterize the SVG.'));
+	        img.src = url;
+	      });
+	    }
+
+	    function canvasToBlob(canvas, type){
+	      return new Promise((resolve, reject) => {
+	        canvas.toBlob(blob => {
+	          if (blob) {
+	            resolve(blob);
+	            return;
+	          }
+	          reject(new Error('Failed to encode the PNG image.'));
+	        }, type);
+	      });
+	    }
+
+	    async function svgToPngBlob(svgString){
+	      const safeSvg = sanitizeSVG(svgString);
+	      const { width, height } = measureSvgForRaster(safeSvg);
+	      const renderScale = clampPngScale(width, height);
+	      const rasterSvg = serializeSvgWithPixelSize(safeSvg, width, height);
+	      const svgBlob = new Blob([rasterSvg], { type: 'image/svg+xml' });
+	      const svgUrl = URL.createObjectURL(svgBlob);
+
+	      try {
+	        const img = await loadImage(svgUrl);
+	        const canvas = document.createElement('canvas');
+	        canvas.width = Math.max(1, Math.round(width * renderScale));
+	        canvas.height = Math.max(1, Math.round(height * renderScale));
+
+	        const ctx = canvas.getContext('2d');
+	        if (!ctx) {
+	          throw new Error('Canvas is unavailable in this browser.');
+	        }
+
+	        ctx.clearRect(0, 0, canvas.width, canvas.height);
+	        ctx.scale(renderScale, renderScale);
+	        ctx.drawImage(img, 0, 0, width, height);
+
+	        return await canvasToBlob(canvas, 'image/png');
+	      } finally {
+	        URL.revokeObjectURL(svgUrl);
+	      }
+	    }
+
+	    function downloadBlob(blob, filename){
+	      const url = URL.createObjectURL(blob);
+	      const a = document.createElement('a');
+	      a.download = filename;
+	      a.href = url;
+	      a.click();
+	      setTimeout(() => URL.revokeObjectURL(url), 0);
 	    }
 
 	    function loadHistory(){
@@ -308,6 +489,7 @@
 	      $link.href = currentBlobUrl;
 	      $link.classList.remove('opacity-40', 'pointer-events-none');
 	      $copyBtn.disabled = false;
+	      $downloadPngBtn.disabled = false;
 	    }
 
 	    function setDraftStatus(text){
@@ -339,7 +521,7 @@
 	    }
 
 	    function showSvg(svgString){
-	      const safeSvg = sanitizeSVG(svgString);
+	      const safeSvg = finalizeSvgForExport(svgString);
 	      $preview.innerHTML = '';
 	      $preview.appendChild(svgStringToElement(safeSvg));
 	      currentSvgString = safeSvg;
@@ -461,26 +643,33 @@
 
 	      try {
 	        if (window.ClipboardItem && navigator.clipboard?.write) {
-	          const item = new ClipboardItem({
-	            'image/svg+xml': new Blob([safe], { type: 'image/svg+xml' }),
+	          const pngBlob = await svgToPngBlob(safe);
+	          const payload = {
+	            'image/png': pngBlob,
 	            'text/plain': new Blob([safe], { type: 'text/plain' })
+	          };
+	          if (typeof ClipboardItem.supports !== 'function' || ClipboardItem.supports('image/svg+xml')) {
+	            payload['image/svg+xml'] = new Blob([safe], { type: 'image/svg+xml' });
+	          }
+	          const item = new ClipboardItem({
+	            ...payload
 	          });
 	          await navigator.clipboard.write([item]);
 	          flashCopySuccess();
-	          setStatus('SVG copied to the clipboard.', 'success');
+	          setStatus('PNG copied for PowerPoint. SVG is also included when the browser allows it.', 'success');
 	          return;
 	        }
 
 	        if (navigator.clipboard?.writeText) {
 	          await navigator.clipboard.writeText(safe);
 	          flashCopySuccess();
-	          setStatus('SVG source copied as text.', 'success');
+	          setStatus('This browser cannot copy images directly. SVG source was copied as text.', 'success');
 	          return;
 	        }
 
 	        copyTextFallback(safe);
 	        flashCopySuccess();
-	        setStatus('SVG source copied as text.', 'success');
+	        setStatus('This browser cannot copy images directly. SVG source was copied as text.', 'success');
 	      } catch (err) {
 	        try {
 	          if (navigator.clipboard?.writeText) {
@@ -489,7 +678,7 @@
 	            copyTextFallback(safe);
 	          }
 	          flashCopySuccess();
-	          setStatus('Rich SVG copy is not supported here. SVG source was copied as text.', 'success');
+	          setStatus('Rich image copy is not supported here. SVG source was copied as text.', 'success');
 	        } catch (fallbackErr) {
 	          const message = fallbackErr instanceof Error
 	            ? fallbackErr.message
@@ -499,6 +688,19 @@
 	          setStatus(message, 'error');
 	          alert('Failed to copy: ' + message);
 	        }
+	      }
+	    }
+
+	    async function downloadPng(){
+	      if (!currentSvgString) return;
+	      try {
+	        setStatus('Preparing PNG download…');
+	        const pngBlob = await svgToPngBlob(currentSvgString);
+	        downloadBlob(pngBlob, 'formula.png');
+	        setStatus('PNG downloaded.', 'success');
+	      } catch (err) {
+	        const message = err instanceof Error ? err.message : 'PNG download failed.';
+	        setStatus(message, 'error');
 	      }
 	    }
 
@@ -518,6 +720,10 @@
 
 	    $copyBtn.addEventListener('click', () => {
 	      void copyToClipboard();
+	    });
+
+	    $downloadPngBtn.addEventListener('click', () => {
+	      void downloadPng();
 	    });
 
 	    $exportBtn.addEventListener('click', () => {
